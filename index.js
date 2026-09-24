@@ -32,7 +32,7 @@ app.use((req, res, next) => {
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
-    version: "v2",
+    version: "v2.0",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(), // seconds since the process started
   });
