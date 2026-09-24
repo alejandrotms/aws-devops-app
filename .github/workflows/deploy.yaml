@@ -1,0 +1,71 @@
+name: Deploy to EC2
+
+# Trigger: every push to main
+on:
+  push:
+    branches: [main]
+
+# Prevent two deployments from running at the same time
+concurrency:
+  group: deploy-ec2
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # Secrets referenced ONCE here, reused by every step below
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+
+    steps:
+      # 1. Checkout the triggering commit — pins github.sha used in the deploy step
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Load the SSH key once — all later ssh commands reuse it automatically
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+
+      # 3. Trust the EC2 host key (avoids interactive yes/no prompt on first connect)
+      - name: Trust EC2 host key
+        run: mkdir -p ~/.ssh && ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      # 4. Single SSH session: pull code, rebuild, restart, verify
+      #    Fails fast at the first error (set -e) and prints each command's output
+      - name: Deploy to EC2
+        run: |
+          ssh "$EC2_USER@$EC2_HOST" 'bash -s' <<'SCRIPT'
+          set -e
+
+          REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          APP_DIR="$HOME/app"
+
+          # Pull latest code (clone on first run, reuse the repo afterwards)
+          if [ -d "$APP_DIR/.git" ]; then
+            cd "$APP_DIR"
+            git remote set-url origin "$REPO_URL"
+          else
+            git clone "$REPO_URL" "$APP_DIR"
+            cd "$APP_DIR"
+          fi
+          git fetch origin main
+          git reset --hard ${{ github.sha }}
+
+          # Stop and remove the old container (ignore errors if it doesn't exist)
+          docker stop node-app || true
+          docker rm node-app || true
+
+          # Build the new image on EC2
+          docker build -t node-app:latest .
+
+          # Run the new container on port 3000
+          docker run -d --name node-app -p 3000:3000 --restart unless-stopped node-app:latest
+
+          # Verify deployment — fails the whole workflow if /health isn't 200
+          sleep 5
+          curl --fail http://localhost:3000/health
+          SCRIPT
